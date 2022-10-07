@@ -929,7 +929,7 @@ class ClassAbilities(AdventureMixin):
         This allows a Bard to add substantial diplomacy bonuses for one battle.
         """
         skillmessage = [
-            "{skill} **{c}** is whipping up a performance... {skill}"
+            "{skill} {c} is whipping up a performance... {skill}"
         ]
         
         async with self.get_lock(ctx.author):
