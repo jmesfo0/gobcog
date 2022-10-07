@@ -697,15 +697,15 @@ class BackPackCommands(AdventureMixin):
                 if pred.result:  # buyer reacted with Yes.
                     with contextlib.suppress(discord.errors.NotFound):
                         if await bank.can_spend(buyer, asking):
-                            if buy_user.rebirths + 1 < c.rebirths:
-                                return await smart_embed(
-                                    ctx,
-                                    _(
-                                        "You can only trade with people that are the same "
-                                        "rebirth level, one rebirth level less than you, "
-                                        "or a higher rebirth level than yours."
-                                    ),
-                                )
+                            # if buy_user.rebirths + 1 < c.rebirths:
+                                # return await smart_embed(
+                                    # ctx,
+                                    # _(
+                                        # "You can only trade with people that are the same "
+                                        # "rebirth level, one rebirth level less than you, "
+                                        # "or a higher rebirth level than yours."
+                                    # ),
+                                # )
                             try:
                                 await bank.transfer_credits(buyer, ctx.author, asking)
                             except BalanceTooHigh as e:
