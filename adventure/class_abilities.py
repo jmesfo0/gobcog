@@ -5,6 +5,7 @@ import logging
 import random
 import time
 
+
 import discord
 from discord.ext.commands.errors import BadArgument
 from redbot.core import commands
@@ -20,6 +21,7 @@ from .constants import ORDER
 from .converters import ItemConverter
 from .helpers import escape, is_dev, smart_embed
 from .menus import BaseMenu, SimpleSource
+             
 
 _ = Translator("Adventure", __file__)
 
@@ -560,6 +562,10 @@ class ClassAbilities(AdventureMixin):
 
         This allows a praying Cleric to add substantial bonuses for heroes fighting the battle.
         """
+        skillmessage = [
+            "{bless} {c} is starting an inspiring sermon. {bless}"        
+        ]
+        
         async with self.get_lock(ctx.author):
             try:
                 c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
@@ -588,7 +594,7 @@ class ClassAbilities(AdventureMixin):
 
                     await smart_embed(
                         ctx,
-                        _("{bless} {c} is starting an inspiring sermon. {bless}").format(
+                        _(random.choice(skillmessage)).format(
                             c=bold(ctx.author.display_name), bless=self.emojis.skills.bless
                         ),
                     )
@@ -612,6 +618,10 @@ class ClassAbilities(AdventureMixin):
         """[Psychic Class Only]
         This allows a Psychic to expose the current enemy's weakeness to the party.
         """
+        skillmessage = [
+            "{skill} {c} is focusing on the monster ahead...{skill}"
+        ]
+        
         try:
             c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
         except Exception:
@@ -658,7 +668,7 @@ class ClassAbilities(AdventureMixin):
                     if good:
                         await smart_embed(
                             ctx,
-                            _("{skill} {c} is focusing on the monster ahead...{skill}").format(
+                            _(random.choice(skillmessage)).format(
                                 c=bold(ctx.author.display_name),
                                 skill=self.emojis.skills.psychic,
                             ),
@@ -805,6 +815,13 @@ class ClassAbilities(AdventureMixin):
 
         This allows a Berserker to add substantial attack bonuses for one battle.
         """
+        skillmessage = [
+            '{skill} {c} is starting to get all red in the face! 😡 {skill}',
+            '{skill} {c} is starting to get really really angry! 😡 {skill}', 
+            '{skill} {c} is starting to froth at the mouth... {skill}',
+            '{skill} {c} is constipated and ready to bring the pain! 😡 {skill}'
+            ]
+        
         async with self.get_lock(ctx.author):
             try:
                 c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
@@ -832,7 +849,7 @@ class ClassAbilities(AdventureMixin):
                     await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
                     await smart_embed(
                         ctx,
-                        _("{skill} {c} is starting to froth at the mouth... {skill}").format(
+                        _(random.choice(skillmessage)).format(
                             c=bold(ctx.author.display_name),
                             skill=self.emojis.skills.berserker,
                         ),
@@ -856,6 +873,10 @@ class ClassAbilities(AdventureMixin):
 
         This allows a Wizard to add substantial magic bonuses for one battle.
         """
+        skillmessage = [
+            "{skill} {c} is focusing all of their energy... {skill}"
+        ]
+        
         async with self.get_lock(ctx.author):
             try:
                 c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
@@ -884,7 +905,7 @@ class ClassAbilities(AdventureMixin):
                     await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
                     await smart_embed(
                         ctx,
-                        _("{skill} {c} is focusing all of their energy... {skill}").format(
+                        _(random.choice(skillmessage)).format(
                             c=bold(ctx.author.display_name),
                             skill=self.emojis.skills.wizzard,
                         ),
@@ -907,6 +928,10 @@ class ClassAbilities(AdventureMixin):
 
         This allows a Bard to add substantial diplomacy bonuses for one battle.
         """
+        skillmessage = [
+            "{skill} **{c}** is whipping up a performance... {skill}"
+        ]
+        
         async with self.get_lock(ctx.author):
             try:
                 c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
@@ -934,7 +959,7 @@ class ClassAbilities(AdventureMixin):
                     await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
                     await smart_embed(
                         ctx,
-                        _("{skill} {c} is whipping up a performance... {skill}").format(
+                        _(random.choice(skillmessage)).format(
                             c=bold(ctx.author.display_name), skill=self.emojis.skills.bard
                         ),
                     )
