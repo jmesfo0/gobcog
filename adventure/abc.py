@@ -10,7 +10,8 @@ from redbot.core.bot import Red
 
 if TYPE_CHECKING:
     from .adventureset import TaxesConverter
-    from .charsheet import BackpackFilterParser, Character
+    from .charsheet import BackpackFilterParser, Character, Item
+    from .constants import Rarities, Treasure
     from .converters import (
         DayConverter,
         EquipableItemConverter,
@@ -48,6 +49,7 @@ class AdventureMixin(ABC):
         self._curent_trader_stock = {}
         self._sessions: MutableMapping[int, GameSession] = {}
         self._react_messaged = []
+        self._daily_bonus: dict = {}
         self.tasks = {}
         self.locks: MutableMapping[int, asyncio.Lock] = {}
         self.gb_task = None
@@ -61,10 +63,22 @@ class AdventureMixin(ABC):
         self.MONSTER_NOW: dict = None
         self.LOCATIONS: list = None
         self.PETS: dict = None
+        self.EQUIPMENT: dict = None
+        self.MATERIALS: dict = None
+        self.PREFIXES: dict = None
+        self.SUFFIXES: dict = None
 
     #######################################################################
     # adventure.py                                                        #
     #######################################################################
+
+    @abstractmethod
+    def get_lock(self, member: discord.User) -> asyncio.Lock:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def in_adventure(self, ctx: Optional[commands.Context] = None, user: Optional[discord.Member] = None) -> bool:
+        raise NotImplementedError()
 
     @abstractmethod
     async def _clear_react(self, msg: discord.Message):
@@ -168,15 +182,13 @@ class AdventureMixin(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def _add_rewards(self, ctx: commands.Context, user, exp, cp, special):
+    async def _add_rewards(
+        self, ctx: commands.Context, user: Union[discord.Member, discord.User], exp: int, cp: int, special: Treasure
+    ) -> Optional[str]:
         raise NotImplementedError()
 
     @abstractmethod
     async def _adv_countdown(self, ctx: commands.Context, seconds, title) -> asyncio.Task:
-        raise NotImplementedError()
-
-    @abstractmethod
-    async def _cart_countdown(self, ctx: commands.Context, seconds, title, room=None) -> asyncio.Task:
         raise NotImplementedError()
 
     @abstractmethod
@@ -188,7 +200,7 @@ class AdventureMixin(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def _roll_chest(self, chest_type: str, c: Character):
+    async def _roll_chest(self, chest_type: Rarities, c: Character):
         raise NotImplementedError()
 
     @abstractmethod
@@ -314,7 +326,7 @@ class AdventureMixin(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def adventuresettings(self, ctx: commands.Context):
+    async def showsettings(self, ctx: commands.Context):
         raise NotImplementedError()
 
     #######################################################################
@@ -356,10 +368,6 @@ class AdventureMixin(ABC):
 
     @abstractmethod
     async def backpack_sell(self, ctx: commands.Context, *, item: ItemConverter):
-        raise NotImplementedError()
-
-    @abstractmethod
-    async def _backpack_sell_button_action(self, ctx, emoji, page, item, price_shown, character):
         raise NotImplementedError()
 
     @abstractmethod
@@ -406,22 +414,6 @@ class AdventureMixin(ABC):
 
     @abstractmethod
     async def commands_cbackpack_sell(self, ctx: commands.Context, *, query: BackpackFilterParser):
-        raise NotImplementedError()
-
-    #######################################################################
-    # cart.py                                                             #
-    #######################################################################
-
-    @abstractmethod
-    async def _handle_cart(self, reaction: discord.Reaction, user: discord.Member):
-        raise NotImplementedError()
-
-    @abstractmethod
-    async def _trader(self, ctx: commands.Context, bypass=False):
-        raise NotImplementedError()
-
-    @abstractmethod
-    async def _trader_get_items(self, howmany: int):
         raise NotImplementedError()
 
     #######################################################################
@@ -519,7 +511,7 @@ class AdventureMixin(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def _genitem(self, ctx: commands.Context, rarity: str = None, slot: str = None):
+    async def _genitem(self, ctx: commands.Context, rarity: Optional[Rarities] = None, slot: str = None) -> Item:
         raise NotImplementedError()
 
     @abstractmethod
@@ -678,14 +670,14 @@ class AdventureMixin(ABC):
     async def _open_chests(
         self,
         ctx: commands.Context,
-        chest_type: str,
+        chest_type: Rarities,
         amount: int,
         character: Character,
     ):
         raise NotImplementedError()
 
     @abstractmethod
-    async def _open_chest(self, ctx: commands.Context, user, chest_type, character):
+    async def _open_chest(self, ctx: commands.Context, user: discord.User, chest_type: Rarities, character: Character):
         raise NotImplementedError()
 
     #######################################################################

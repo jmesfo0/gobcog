@@ -12,13 +12,11 @@ from redbot.core.errors import BalanceTooHigh
 from redbot.core.i18n import Translator
 from redbot.core.utils import AsyncIter
 from redbot.core.utils.chat_formatting import bold, box, humanize_list, humanize_number, pagify
-from redbot.core.utils.menus import menu, start_adding_reactions
-from redbot.core.utils.predicates import ReactionPredicate
 
 from .abc import AdventureMixin
 from .bank import bank
 from .charsheet import Character, Item
-from .constants import ORDER, RARITIES
+from .constants import ORDER, HeroClasses, Rarities
 from .converters import (
     BackpackFilterParser,
     EquipableItemConverter,
@@ -27,7 +25,7 @@ from .converters import (
     RarityConverter,
     SlotConverter,
 )
-from .helpers import _sell, escape, is_dev, smart_embed
+from .helpers import ConfirmView, _sell, escape, is_dev, smart_embed
 from .menus import BackpackMenu, BaseMenu, SimpleSource
 
 _ = Translator("Adventure", __file__)
@@ -35,10 +33,162 @@ _ = Translator("Adventure", __file__)
 log = logging.getLogger("red.cogs.adventure")
 
 
+class BackpackSellView(discord.ui.View):
+    def __init__(self, timeout: float, ctx: commands.Context, character: Character, item: Item, price: int):
+        super().__init__(timeout=timeout)
+        self.author = ctx.author
+        self.character = character
+        self.ctx = ctx
+        self.item = item
+        self.price = price
+        self.cog: AdventureMixin = self.ctx.bot.get_cog("Adventure")
+
+    async def final_message(self, msg: str, interaction: discord.Interaction, character: Character):
+        character.last_known_currency = await bank.get_balance(self.ctx.author)
+        character.last_currency_check = time.time()
+        await self.cog.config.user(self.ctx.author).set(await character.to_json(self.ctx, self.cog.config))
+        self.stop()
+        pages = [page for page in pagify(msg, delims=["\n"], page_length=1900)]
+        await BaseMenu(
+            source=SimpleSource(pages),
+            delete_message_after=True,
+            clear_reactions_after=True,
+            timeout=180,
+        ).start(None, interaction=interaction)
+
+    @discord.ui.button(style=discord.ButtonStyle.red, emoji="\N{HEAVY MULTIPLICATION X}\N{VARIATION SELECTOR-16}")
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(
+            content=box(_("You decide not to sell {item}").format(item=str(self.item)), lang="ansi"), view=None
+        )
+
+    @discord.ui.button(
+        label=_("Sell 1"),
+        emoji="\N{DIGIT ONE}\N{COMBINING ENCLOSING KEYCAP}",
+        style=discord.ButtonStyle.grey,
+    )
+    async def sell_one_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.ctx.command.reset_cooldown(self.ctx)
+        # sell one of the item
+        async with self.cog.get_lock(self.author):
+            try:
+                character = await Character.from_json(self.ctx, self.cog.config, self.author, self.cog._daily_bonus)
+            except Exception as exc:
+                self.ctx.command.reset_cooldown(self.ctx)
+                log.exception("Error with the new character sheet", exc_info=exc)
+                return
+            currency_name = await bank.get_currency_name(
+                self.ctx.guild,
+            )
+            price = 0
+            price += self.price
+            msg = _("**{author}** sold one {item} for {price} {currency_name}.\n").format(
+                author=escape(self.ctx.author.display_name),
+                item=box(self.item.ansi, lang="ansi"),
+                price=humanize_number(price),
+                currency_name=currency_name,
+            )
+            character.backpack[self.item.name].owned -= 1
+            if character.backpack[self.item.name].owned <= 0:
+                del character.backpack[self.item.name]
+            price = max(price, 0)
+            if price > 0:
+                try:
+                    await bank.deposit_credits(self.ctx.author, price)
+                except BalanceTooHigh as e:
+                    await bank.set_balance(self.ctx.author, e.max_balance)
+            await self.final_message(msg, interaction, character)
+
+    @discord.ui.button(
+        label=_("Sell all"),
+        emoji="\N{CLOCKWISE RIGHTWARDS AND LEFTWARDS OPEN CIRCLE ARROWS}",
+        style=discord.ButtonStyle.grey,
+    )
+    async def sell_all_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.ctx.command.reset_cooldown(self.ctx)
+        async with self.cog.get_lock(self.author):
+            try:
+                character = await Character.from_json(self.ctx, self.cog.config, self.author, self.cog._daily_bonus)
+            except Exception as exc:
+                self.ctx.command.reset_cooldown(self.ctx)
+                log.exception("Error with the new character sheet", exc_info=exc)
+                return
+            currency_name = await bank.get_currency_name(
+                self.ctx.guild,
+            )
+            price = 0
+            old_owned = self.item.owned
+            count = 0
+            async for _loop_counter in AsyncIter(range(0, self.item.owned), steps=50):
+                price += self.price
+                character.backpack[self.item.name].owned -= 1
+                if character.backpack[self.item.name].owned <= 0:
+                    del character.backpack[self.item.name]
+                count += 1
+            msg = _("**{author}** sold all their {old_item} for {price} {currency_name}.\n").format(
+                author=escape(self.ctx.author.display_name),
+                old_item=box(self.item.ansi + " - " + str(old_owned), lang="ansi"),
+                price=humanize_number(price),
+                currency_name=currency_name,
+            )
+            price = max(price, 0)
+            if price > 0:
+                try:
+                    await bank.deposit_credits(self.ctx.author, price)
+                except BalanceTooHigh as e:
+                    await bank.set_balance(self.ctx.author, e.max_balance)
+            await self.final_message(msg, interaction, character)
+
+    @discord.ui.button(
+        label=_("Sell all but one"),
+        emoji="\N{CLOCKWISE RIGHTWARDS AND LEFTWARDS OPEN CIRCLE ARROWS WITH CIRCLED ONE OVERLAY}",
+        style=discord.ButtonStyle.grey,
+    )
+    async def sell_all_but_one_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.item.owned == 1:
+            self.ctx.command.reset_cooldown(self.ctx)
+            return await smart_embed(self.ctx, _("You already only own one of those items."))
+        currency_name = await bank.get_currency_name(
+            self.ctx.guild,
+        )
+        async with self.cog.get_lock(self.author):
+            try:
+                character = await Character.from_json(self.ctx, self.cog.config, self.author, self.cog._daily_bonus)
+            except Exception as exc:
+                self.ctx.command.reset_cooldown(self.ctx)
+                log.exception("Error with the new character sheet", exc_info=exc)
+                return
+            price = 0
+            old_owned = self.item.owned
+            count = 0
+            async for _loop_counter in AsyncIter(range(1, character.backpack[self.item.name].owned), steps=50):
+                if character.backpack[self.item.name].owned == 1:
+                    break
+                character.backpack[self.item.name].owned -= 1
+                price += self.price
+                count += 1
+
+            if price != 0:
+                msg = _("**{author}** sold all but one of their {old_item} for {price} {currency_name}.\n").format(
+                    author=escape(self.ctx.author.display_name),
+                    old_item=box(self.item.ansi + " - " + str(old_owned - 1), lang="ansi"),
+                    price=humanize_number(price),
+                    currency_name=currency_name,
+                )
+                price = max(price, 0)
+                if price > 0:
+                    try:
+                        await bank.deposit_credits(self.ctx.author, price)
+                    except BalanceTooHigh as e:
+                        await bank.set_balance(self.ctx.author, e.max_balance)
+                await self.final_message(msg, interaction, character)
+
+
 class BackPackCommands(AdventureMixin):
     """This class will handle interacting with adventures backpack"""
 
-    @commands.group(name="backpack", autohelp=False)
+    @commands.hybrid_group(name="backpack", autohelp=False, fallback="show")
     @commands.bot_has_permissions(add_reactions=True)
     async def _backpack(
         self,
@@ -60,7 +210,8 @@ class BackPackCommands(AdventureMixin):
 
         Note: An item **degrade** level is how many rebirths it will last, before it is broken down.
         """
-        assert isinstance(rarity, str) or rarity is None
+
+        assert isinstance(rarity, Rarities) or rarity is None
         assert isinstance(slot, str) or slot is None
         if not await self.allow_in_dm(ctx):
             return await smart_embed(ctx, _("This command is not available in DM's on this bot."))
@@ -70,21 +221,15 @@ class BackPackCommands(AdventureMixin):
             except Exception as exc:
                 log.exception("Error with the new character sheet", exc_info=exc)
                 return
-            if rarity:
-                rarity = rarity.lower()
-                if rarity not in RARITIES:
-                    return await smart_embed(
-                        ctx,
-                        _("{} is not a valid rarity, select one of {}").format(rarity, humanize_list(RARITIES)),
-                    )
             if slot:
                 slot = slot.lower()
                 if slot not in ORDER:
                     return await smart_embed(
                         ctx,
                         _("{} is not a valid slot, select one of {}").format(slot, humanize_list(ORDER)),
+                        ephemeral=True,
                     )
-
+            await ctx.defer()
             msgs = await c.get_backpack(rarity=rarity, slot=slot, show_delta=show_diff)
             if not msgs:
                 return await smart_embed(
@@ -107,7 +252,9 @@ class BackPackCommands(AdventureMixin):
             return await smart_embed(
                 ctx,
                 _("You tried to equip an item but the monster ahead of you commands your attention."),
+                ephemeral=True,
             )
+        await ctx.defer()
         async with self.get_lock(ctx.author):
             try:
                 c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
@@ -134,7 +281,7 @@ class BackPackCommands(AdventureMixin):
                         _("{author} equipped {item} ({slot} slot).").format(
                             author=escape(ctx.author.display_name), item=str(equip), slot=slot
                         ),
-                        lang="css",
+                        lang="ansi",
                     )
                 else:
                     equip_msg = box(
@@ -144,7 +291,7 @@ class BackPackCommands(AdventureMixin):
                             slot=slot,
                             put=getattr(c, equip.slot[0]),
                         ),
-                        lang="css",
+                        lang="ansi",
                     )
                 await ctx.send(equip_msg)
                 c = await c.equip_item(equip, True, is_dev(ctx.author))  # FIXME:
@@ -159,7 +306,9 @@ class BackPackCommands(AdventureMixin):
             return await smart_embed(
                 ctx,
                 _("You tried to magically equip multiple items at once, but the monster ahead nearly killed you."),
+                ephemeral=True,
             )
+        await ctx.defer()
         set_list = humanize_list(sorted([f"`{i}`" for i in self.SET_BONUSES.keys()], key=str.lower))
         if set_name is None:
             ctx.command.reset_cooldown(ctx)
@@ -202,24 +351,21 @@ class BackPackCommands(AdventureMixin):
             return await smart_embed(
                 ctx,
                 _("You tried to disassemble an item but the monster ahead of you commands your attention."),
+                ephemeral=True,
             )
-
+        await ctx.defer()
         async with self.get_lock(ctx.author):
             if len(backpack_items[1]) > 2:
+                view = ConfirmView(60, ctx.author)
                 msg = await ctx.send(
                     "Are you sure you want to disassemble {count} unique items and their duplicates?".format(
                         count=humanize_number(len(backpack_items[1]))
-                    )
+                    ),
+                    view=view,
                 )
-                start_adding_reactions(msg, ReactionPredicate.YES_OR_NO_EMOJIS)
-                pred = ReactionPredicate.yes_or_no(msg, ctx.author)
-                try:
-                    await ctx.bot.wait_for("reaction_add", check=pred, timeout=60)
-                except asyncio.TimeoutError:
-                    await self._clear_react(msg)
-                    return
-
-                if not pred.result:
+                await view.wait()
+                await msg.edit(view=None)
+                if not view.confirmed:
                     await ctx.send("Not disassembling those items.")
                     return
 
@@ -239,11 +385,11 @@ class BackPackCommands(AdventureMixin):
                     continue
                 if item.name in disassembled:
                     continue
-                if item.rarity in ["forged"]:
+                if item.rarity in [Rarities.forged]:
                     continue
-                index = min(RARITIES.index(item.rarity), 4)
+                index = min(item.rarity.value, 4)
                 if op == "single":
-                    if character.heroclass["name"] != "Tinkerer":
+                    if character.hc is not HeroClasses.tinkerer:
                         roll = random.randint(0, 5)
                         chests = 1
                     else:
@@ -274,7 +420,7 @@ class BackPackCommands(AdventureMixin):
                     disassembled.add(item.name)
                     owned = item.owned
                     async for _loop_counter in AsyncIter(range(0, owned), steps=100):
-                        if character.heroclass["name"] != "Tinkerer":
+                        if character.hc is not HeroClasses.tinkerer:
                             roll = random.randint(0, 5)
                             chests = 1
                         else:
@@ -308,70 +454,58 @@ class BackPackCommands(AdventureMixin):
         slot: Optional[SlotConverter] = None,
     ):
         """Sell all items in your backpack. Optionally specify rarity or slot."""
-        assert isinstance(rarity, str) or rarity is None
+        assert isinstance(rarity, Rarities) or rarity is None
         assert isinstance(slot, str) or slot is None
         if self.in_adventure(ctx):
             return await smart_embed(
                 ctx,
                 _("You tried to go sell your items but the monster ahead is not allowing you to leave."),
+                ephemeral=True,
             )
         if rarity:
-            rarity = rarity.lower()
-            if rarity not in RARITIES:
+            if rarity.name.lower() in ["forged"]:
                 return await smart_embed(
-                    ctx,
-                    _("{} is not a valid rarity, select one of {}").format(rarity, humanize_list(RARITIES)),
+                    ctx, _("You cannot sell `{rarity}` rarity items.").format(rarity=rarity), ephemeral=True
                 )
-            if rarity.lower() in ["forged"]:
-                return await smart_embed(ctx, _("You cannot sell `{rarity}` rarity items.").format(rarity=rarity))
         if slot:
             slot = slot.lower()
             if slot not in ORDER:
                 return await smart_embed(
                     ctx,
                     _("{} is not a valid slot, select one of {}").format(slot, humanize_list(ORDER)),
+                    ephemeral=True,
                 )
-
-        async with self.get_lock(ctx.author):
+        async with ctx.typing():
             if rarity and slot:
-                msg = await ctx.send(
-                    "Are you sure you want to sell all {rarity} {slot} items in your inventory?".format(
-                        rarity=rarity, slot=slot
-                    )
+                msg = _("Are you sure you want to sell all {rarity} {slot} items in your inventory?").format(
+                    rarity=rarity, slot=slot
                 )
             elif rarity or slot:
-                msg = await ctx.send(
-                    "Are you sure you want to sell all{rarity}{slot} items in your inventory?".format(
-                        rarity=f" {rarity}" if rarity else "", slot=f" {slot}" if slot else ""
-                    )
+                msg = _("Are you sure you want to sell all{rarity}{slot} items in your inventory?").format(
+                    rarity=f" {rarity}" if rarity else "", slot=f" {slot}" if slot else ""
                 )
             else:
-                msg = await ctx.send(_("Are you sure you want to sell **ALL ITEMS** in your inventory?"))
-
-            start_adding_reactions(msg, ReactionPredicate.YES_OR_NO_EMOJIS)
-            pred = ReactionPredicate.yes_or_no(msg, ctx.author)
-            try:
-                await ctx.bot.wait_for("reaction_add", check=pred, timeout=60)
-            except asyncio.TimeoutError:
-                await self._clear_react(msg)
-                return
-
-            if not pred.result:
+                msg = _("Are you sure you want to sell **ALL ITEMS** in your inventory?")
+            view = ConfirmView(60, ctx.author)
+            sent_msg = await ctx.send(msg, view=view)
+            await view.wait()
+            await sent_msg.edit(view=None)
+            if not view.confirmed:
                 await ctx.send("Not selling those items.")
                 return
+            async with self.get_lock(ctx.author):
+                msg = ""
+                try:
+                    c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
+                except Exception as exc:
+                    log.exception("Error with the new character sheet", exc_info=exc)
+                    return
+                total_price = 0
 
-            msg = ""
-            try:
-                c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
-            except Exception as exc:
-                log.exception("Error with the new character sheet", exc_info=exc)
-                return
-            total_price = 0
-            async with ctx.typing():
-                items = [i for n, i in c.backpack.items() if i.rarity not in ["forged"]]
+                items = [i for n, i in c.backpack.items() if i.rarity not in [Rarities.forged]]
                 count = 0
                 async for item in AsyncIter(items, steps=100):
-                    if rarity and item.rarity != rarity:
+                    if rarity and item.rarity is not rarity:
                         continue
                     if slot:
                         if len(item.slot) == 1 and slot != item.slot[0]:
@@ -383,14 +517,16 @@ class BackPackCommands(AdventureMixin):
                     async for _loop_counter in AsyncIter(range(0, old_owned), steps=100):
                         item.owned -= 1
                         item_price += _sell(c, item)
+                        log.debug(f"{item_price=}")
                         if item.owned <= 0:
                             del c.backpack[item.name]
                     item_price = max(item_price, 0)
                     msg += _("{old_item} sold for {price}.\n").format(
-                        old_item=str(old_owned) + " " + str(item),
+                        old_item=str(old_owned) + " " + item.ansi,
                         price=humanize_number(item_price),
                     )
                     total_price += item_price
+                    log.debug(f"{total_price}")
                 if total_price > 0:
                     try:
                         await bank.deposit_credits(ctx.author, total_price)
@@ -407,7 +543,7 @@ class BackPackCommands(AdventureMixin):
             items=msg,
         )
         for page in pagify(new_msg, shorten_by=10, page_length=1900):
-            msg_list.append(box(page, lang="css"))
+            msg_list.append(box(page, lang="ansi"))
         await BaseMenu(
             source=SimpleSource(msg_list),
             delete_message_after=True,
@@ -424,150 +560,40 @@ class BackPackCommands(AdventureMixin):
             return await smart_embed(
                 ctx,
                 _("You tried to go sell your items but the monster ahead is not allowing you to leave."),
+                ephemeral=True,
             )
-        if item.rarity in ["forged"]:
+        if item.rarity in [Rarities.forged]:
             ctx.command.reset_cooldown(ctx)
             return await ctx.send(
                 box(
                     _("\n{author}, your {device} is refusing to be sold and bit your finger for trying.").format(
-                        author=escape(ctx.author.display_name), device=str(item)
+                        author=escape(ctx.author.display_name), device=item.ansi
                     ),
-                    lang="css",
+                    lang="ansi",
                 )
             )
-
-        async with self.get_lock(ctx.author):
-            try:
-                c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
-            except Exception as exc:
-                ctx.command.reset_cooldown(ctx)
-                log.exception("Error with the new character sheet", exc_info=exc)
-                return
-            price_shown = _sell(c, item)
-            messages = [
-                _("{author}, do you want to sell this item for {price} each? {item}").format(
-                    author=bold(ctx.author.display_name),
-                    item=box(str(item), lang="css"),
-                    price=humanize_number(price_shown),
-                )
-            ]
-            try:
-                item = c.backpack[item.name]
-            except KeyError:
-                return
-
-            async def _backpack_sell_menu(
-                ctx: commands.Context,
-                pages: list,
-                controls: dict,
-                message: discord.Message,
-                page: int,
-                timeout: float,
-                emoji: str,
-            ):
-                if message:
-                    with contextlib.suppress(discord.HTTPException):
-                        await message.delete()
-                    await self._backpack_sell_button_action(ctx, emoji, page, item, price_shown, c)
-                    return None
-
-            back_pack_sell_controls = {
-                "\N{DIGIT ONE}\N{COMBINING ENCLOSING KEYCAP}": _backpack_sell_menu,
-                "\N{CLOCKWISE RIGHTWARDS AND LEFTWARDS OPEN CIRCLE ARROWS}": _backpack_sell_menu,
-                "\N{CLOCKWISE RIGHTWARDS AND LEFTWARDS OPEN CIRCLE ARROWS WITH CIRCLED ONE OVERLAY}": _backpack_sell_menu,
-                "\N{CROSS MARK}": _backpack_sell_menu,
-            }
-
-            await menu(ctx, messages, back_pack_sell_controls, timeout=60)
-
-    async def _backpack_sell_button_action(self, ctx, emoji, page, item, price_shown, character):
-        currency_name = await bank.get_currency_name(
-            ctx.guild,
+        await ctx.defer()
+        try:
+            c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
+        except Exception as exc:
+            ctx.command.reset_cooldown(ctx)
+            log.exception("Error with the new character sheet", exc_info=exc)
+            return
+        price_shown = _sell(c, item)
+        message = _("**{author}**, do you want to sell this item for {price} each? {item}").format(
+            author=escape(ctx.author.display_name),
+            item=box(item.ansi, lang="ansi"),
+            price=humanize_number(price_shown),
         )
-        msg = ""
-        if emoji == "\N{DIGIT ONE}\N{COMBINING ENCLOSING KEYCAP}":  # user reacted with one to sell.
-            ctx.command.reset_cooldown(ctx)
-            # sell one of the item
-            price = 0
-            item.owned -= 1
-            price += price_shown
-            msg += _("{author} sold one {item} for {price} {currency_name}.\n").format(
-                author=bold(ctx.author.display_name),
-                item=box(item, lang="css"),
-                price=humanize_number(price),
-                currency_name=currency_name,
-            )
-            if item.owned <= 0:
-                del character.backpack[item.name]
-            price = max(price, 0)
-            if price > 0:
-                try:
-                    await bank.deposit_credits(ctx.author, price)
-                except BalanceTooHigh as e:
-                    await bank.set_balance(ctx.author, e.max_balance)
-        elif emoji == "\N{CLOCKWISE RIGHTWARDS AND LEFTWARDS OPEN CIRCLE ARROWS}":  # user wants to sell all owned.
-            ctx.command.reset_cooldown(ctx)
-            price = 0
-            old_owned = item.owned
-            count = 0
-            async for _loop_counter in AsyncIter(range(0, item.owned), steps=50):
-                item.owned -= 1
-                price += price_shown
-                if item.owned <= 0:
-                    del character.backpack[item.name]
-                count += 1
-            msg += _("{author} sold all their {old_item} for {price} {currency_name}.\n").format(
-                author=bold(ctx.author.display_name),
-                old_item=box(str(item) + " - " + str(old_owned), lang="css"),
-                price=humanize_number(price),
-                currency_name=currency_name,
-            )
-            price = max(price, 0)
-            if price > 0:
-                try:
-                    await bank.deposit_credits(ctx.author, price)
-                except BalanceTooHigh as e:
-                    await bank.set_balance(ctx.author, e.max_balance)
-        elif (
-            emoji == "\N{CLOCKWISE RIGHTWARDS AND LEFTWARDS OPEN CIRCLE ARROWS WITH CIRCLED ONE OVERLAY}"
-        ):  # user wants to sell all but one.
-            if item.owned == 1:
-                ctx.command.reset_cooldown(ctx)
-                return await smart_embed(ctx, _("You already only own one of those items."))
-            price = 0
-            old_owned = item.owned
-            count = 0
-            async for _loop_counter in AsyncIter(range(1, item.owned), steps=50):
-                item.owned -= 1
-                price += price_shown
-            count += 1
-            if price != 0:
-                msg += _("{author} sold all but one of their {old_item} for {price} {currency_name}.\n").format(
-                    author=bold(ctx.author.display_name),
-                    old_item=box(str(item) + " - " + str(old_owned - 1), lang="css"),
-                    price=humanize_number(price),
-                    currency_name=currency_name,
-                )
-                price = max(price, 0)
-                if price > 0:
-                    try:
-                        await bank.deposit_credits(ctx.author, price)
-                    except BalanceTooHigh as e:
-                        await bank.set_balance(ctx.author, e.max_balance)
-        else:  # user doesn't want to sell those items.
-            await ctx.send(_("Not selling those items."))
+        try:
+            item = c.backpack[item.name]
+        except KeyError:
+            return
 
-        if msg:
-            character.last_known_currency = await bank.get_balance(ctx.author)
-            character.last_currency_check = time.time()
-            await self.config.user(ctx.author).set(await character.to_json(ctx, self.config))
-            pages = [page for page in pagify(msg, delims=["\n"], page_length=1900)]
-            await BaseMenu(
-                source=SimpleSource(pages),
-                delete_message_after=True,
-                clear_reactions_after=True,
-                timeout=60,
-            ).start(ctx=ctx)
+        view = BackpackSellView(180, ctx, c, item, price_shown)
+        msg = await ctx.send(message, view=view)
+        await view.wait()
+        await msg.edit(view=None)
 
     @_backpack.command(name="trade")
     async def backpack_trade(
@@ -583,11 +609,13 @@ class BackPackCommands(AdventureMixin):
             return await smart_embed(
                 ctx,
                 _("You take the item and pass it from one hand to the other. Congratulations, you traded yourself."),
+                ephemeral=True,
             )
         if self.in_adventure(ctx):
             return await smart_embed(
                 ctx,
                 _("You tried to trade an item to a party member but the monster ahead commands your attention."),
+                ephemeral=True,
             )
         if self.in_adventure(user=buyer):
             return await smart_embed(
@@ -595,9 +623,11 @@ class BackPackCommands(AdventureMixin):
                 _("{buyer} is currently in an adventure... you were unable to reach them via pigeon.").format(
                     buyer=bold(buyer.display_name)
                 ),
+                ephemeral=True,
             )
         if asking < 0:
-            return await ctx.send(_("You can't *sell* for less than 0..."))
+            return await ctx.send(_("You can't *sell* for less than 0..."), ephemeral=True)
+        await ctx.defer()
         try:
             c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
         except Exception as exc:
@@ -633,23 +663,23 @@ class BackPackCommands(AdventureMixin):
                 ),
             )
             return
-        if any([x for x in lookup if x.rarity == "forged"]):
-            device = [x for x in lookup if x.rarity == "forged"]
+        if any([x for x in lookup if x.rarity is Rarities.forged]):
+            device = [x for x in lookup if x.rarity is Rarities.forged]
             return await ctx.send(
                 box(
                     _("\n{author}, your {device} does not want to leave you.").format(
                         author=escape(ctx.author.display_name), device=str(device[0])
                     ),
-                    lang="css",
+                    lang="ansi",
                 )
             )
-        elif any([x for x in lookup if x.rarity == "set"]):
+        elif any([x for x in lookup if x.rarity is Rarities.set]):
             return await ctx.send(
                 box(
                     _("\n{character}, you cannot trade Set items as they are bound to your soul.").format(
                         character=escape(ctx.author.display_name)
                     ),
-                    lang="css",
+                    lang="ansi",
                 )
             )
         else:
@@ -683,18 +713,17 @@ class BackPackCommands(AdventureMixin):
                     asking=str(asking),
                     currency_name=currency_name,
                 ),
-                lang="css",
+                lang="ansi",
             )
-            async with self.get_lock(ctx.author):
-                trade_msg = await ctx.send(f"{buyer.mention}\n{trade_talk}")
-                start_adding_reactions(trade_msg, ReactionPredicate.YES_OR_NO_EMOJIS)
-                pred = ReactionPredicate.yes_or_no(trade_msg, buyer)
-                try:
-                    await ctx.bot.wait_for("reaction_add", check=pred, timeout=60)
-                except asyncio.TimeoutError:
-                    await self._clear_react(trade_msg)
-                    return
-                if pred.result:  # buyer reacted with Yes.
+            view = ConfirmView(60, buyer)
+            trade_msg = await ctx.send(f"{buyer.mention}\n{trade_talk}", view=view)
+
+            await view.wait()
+            await trade_msg.edit(view=None)
+            if asking is None:
+                asking = 1000
+            if view.confirmed:  # buyer reacted with Yes.
+                async with self.get_lock(ctx.author):
                     with contextlib.suppress(discord.errors.NotFound):
                         if await bank.can_spend(buyer, asking):
                             # if buy_user.rebirths + 1 < c.rebirths:
@@ -735,7 +764,7 @@ class BackPackCommands(AdventureMixin):
                                             asking=asking,
                                             currency_name=currency_name,
                                         ),
-                                        lang="css",
+                                        lang="ansi",
                                     )
                                 )
                             )
@@ -747,9 +776,9 @@ class BackPackCommands(AdventureMixin):
                                     currency_name=currency_name,
                                 )
                             )
-                else:
-                    with contextlib.suppress(discord.HTTPException):
-                        await trade_msg.delete()
+            else:
+                with contextlib.suppress(discord.HTTPException):
+                    await trade_msg.delete()
 
     @commands.command(name="ebackpack")
     @commands.bot_has_permissions(add_reactions=True)
@@ -767,7 +796,7 @@ class BackPackCommands(AdventureMixin):
 
         Note: An item **degrade** level is how many rebirths it will last, before it is broken down.
         """
-        assert isinstance(rarity, str) or rarity is None
+        assert isinstance(rarity, Rarities) or rarity is None
         assert isinstance(slot, str) or slot is None
         if not await self.allow_in_dm(ctx):
             return await smart_embed(ctx, _("This command is not available in DM's on this bot."))
@@ -777,13 +806,6 @@ class BackPackCommands(AdventureMixin):
             except Exception as exc:
                 log.exception("Error with the new character sheet", exc_info=exc)
                 return
-            if rarity:
-                rarity = rarity.lower()
-                if rarity not in RARITIES:
-                    return await smart_embed(
-                        ctx,
-                        _("{} is not a valid rarity, select one of {}").format(rarity, humanize_list(RARITIES)),
-                    )
             if slot:
                 slot = slot.lower()
                 if slot not in ORDER:
@@ -799,7 +821,7 @@ class BackPackCommands(AdventureMixin):
                     help_command=self.commands_equipable_backpack,
                     delete_message_after=True,
                     clear_reactions_after=True,
-                    timeout=60,
+                    timeout=180,
                 ).start(ctx=ctx)
             else:
                 return await smart_embed(
@@ -843,7 +865,7 @@ class BackPackCommands(AdventureMixin):
                 help_command=self.commands_cbackpack,
                 delete_message_after=True,
                 clear_reactions_after=True,
-                timeout=60,
+                timeout=180,
             ).start(ctx=ctx)
         else:
             return await smart_embed(
@@ -875,21 +897,17 @@ class BackPackCommands(AdventureMixin):
                 return
             slots = await character.get_argparse_backpack_items(query, rarity_exclude=["forged"])
             if (total_items := sum(len(i) for s, i in slots)) > 2:
-
+                view = ConfirmView(60, ctx.author)
                 msg = await ctx.send(
                     "Are you sure you want to disassemble {count} unique items and their duplicates?".format(
                         count=humanize_number(total_items)
-                    )
+                    ),
+                    view=view,
                 )
-                start_adding_reactions(msg, ReactionPredicate.YES_OR_NO_EMOJIS)
-                pred = ReactionPredicate.yes_or_no(msg, ctx.author)
-                try:
-                    await ctx.bot.wait_for("reaction_add", check=pred, timeout=60)
-                except asyncio.TimeoutError:
-                    await self._clear_react(msg)
-                    return
 
-                if not pred.result:
+                await view.wait()
+                await msg.edit(view=None)
+                if not view.confirmed:
                     await ctx.send("Not disassembling those items.")
                     return
         failed = 0
@@ -904,14 +922,14 @@ class BackPackCommands(AdventureMixin):
                     continue
                 if item.name in disassembled:
                     continue
-                if item.rarity in ["forged"]:
+                if item.rarity in [Rarities.forged]:
                     failed += 1
                     continue
-                index = min(RARITIES.index(item.rarity), 4)
+                index = min(item.rarity.value, 4)
                 disassembled.add(item.name)
                 owned = item.owned
                 async for _loop_counter in AsyncIter(range(0, owned), steps=100):
-                    if character.heroclass["name"] != "Tinkerer":
+                    if character.hc is not HeroClasses.tinkerer:
                         roll = random.randint(0, 5)
                         chests = 1
                     else:
@@ -934,7 +952,6 @@ class BackPackCommands(AdventureMixin):
                 _("No items matched your query.").format(),
             )
         else:
-
             await self.config.user(ctx.author).set(await character.to_json(ctx, self.config))
             return await smart_embed(
                 ctx,
@@ -967,20 +984,17 @@ class BackPackCommands(AdventureMixin):
                 return
             slots = await character.get_argparse_backpack_items(query, rarity_exclude=["forged"])
             if (total_items := sum(len(i) for s, i in slots)) > 2:
+                view = ConfirmView(60, ctx.author)
                 msg = await ctx.send(
                     "Are you sure you want to sell {count} items in your inventory that match this query?".format(
                         count=humanize_number(total_items)
-                    )
+                    ),
+                    view=view,
                 )
-                start_adding_reactions(msg, ReactionPredicate.YES_OR_NO_EMOJIS)
-                pred = ReactionPredicate.yes_or_no(msg, ctx.author)
-                try:
-                    await ctx.bot.wait_for("reaction_add", check=pred, timeout=60)
-                except asyncio.TimeoutError:
-                    await self._clear_react(msg)
-                    return
 
-                if not pred.result:
+                await view.wait()
+                await msg.edit(view=None)
+                if not view.confirmed:
                     await ctx.send("Not selling those items.")
                     return
             total_price = 0
@@ -997,7 +1011,7 @@ class BackPackCommands(AdventureMixin):
                                 del character.backpack[item.name]
                         item_price = max(item_price, 0)
                         msg += _("{old_item} sold for {price}.\n").format(
-                            old_item=str(old_owned) + " " + str(item),
+                            old_item=str(old_owned) + " " + item.ansi,
                             price=humanize_number(item_price),
                         )
                         total_price += item_price
@@ -1023,10 +1037,10 @@ class BackPackCommands(AdventureMixin):
                     items=msg,
                 )
                 for page in pagify(new_msg, shorten_by=10, page_length=1900):
-                    msg_list.append(box(page, lang="css"))
+                    msg_list.append(box(page, lang="ansi"))
                 await BaseMenu(
                     source=SimpleSource(msg_list),
                     delete_message_after=True,
                     clear_reactions_after=True,
-                    timeout=60,
+                    timeout=180,
                 ).start(ctx=ctx)

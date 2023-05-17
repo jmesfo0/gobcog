@@ -2,6 +2,10 @@
 
 In this RPG cog originally by locastan - TrustyJAID, Draper, and myself have crafted a fun idle game you can play with the members of your servers.
 
+### >>> This branch is compatible with Red 3.5, and not 3.4.x <<<
+
+If you need a Red 3.4 version of this cog, see [here](https://github.com/aikaterna/gobcog/tree/red3.4).
+
 
 ## Basic Usage
 
@@ -116,7 +120,7 @@ Going from least to most powerful, generally the progression is normal < rare < 
 Forged items are a Tinker's specialty.
 Event items can be created by a bot owner as a special reward to hand out to specific users for bot events or other incentive-based rewards.
 
-```css
+```ansi
 {Event:''Event items look like this''}
 {.:'Forged items look like this':.}
 {Set:''Set items look like this''}

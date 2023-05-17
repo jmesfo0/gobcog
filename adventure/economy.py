@@ -2,19 +2,20 @@
 import logging
 import re
 import time
-from typing import Union
+from typing import Literal, Union
 
 import discord
 from beautifultable import ALIGN_LEFT, BeautifulTable
 from redbot.core import commands
 from redbot.core.errors import BalanceTooHigh
 from redbot.core.i18n import Translator
-from redbot.core.utils.chat_formatting import box, humanize_number
+from redbot.core.utils.chat_formatting import box, humanize_list, humanize_number
 
 from .abc import AdventureMixin
 from .bank import bank
 from .charsheet import Character, Item
-from .converters import Stats
+from .constants import ANSITextColours, Rarities
+from .converters import RarityConverter, Stats
 from .helpers import escape, has_separated_economy, smart_embed
 from .menus import BaseMenu, SimpleSource
 
@@ -253,7 +254,7 @@ class EconomyCommands(AdventureMixin):
         for k, v in sets.items():
             if len(str(table)) > 1500:
                 table.rows.sort("Name", reverse=False)
-                msgs.append(box(str(table) + f"\nPage {len(msgs) + 1}", lang="css"))
+                msgs.append(box(str(table) + f"\nPage {len(msgs) + 1}", lang="ansi"))
                 table = BeautifulTable(default_alignment=ALIGN_LEFT, maxwidth=500)
                 table.set_style(BeautifulTable.STYLE_RST)
                 table.columns.header = [
@@ -261,9 +262,15 @@ class EconomyCommands(AdventureMixin):
                     "Unique Pieces",
                     "Unique Owned",
                 ]
-            table.rows.append((k, f"{v[0]}", f" {v[1]}" if v[1] == v[0] else f"[{v[1]}]"))
+            table.rows.append(
+                (
+                    k,
+                    f"{v[0]}",
+                    f" {v[1]}" if v[1] == v[0] else ANSITextColours.red.as_str(v[1]),
+                )
+            )
         table.rows.sort("Name", reverse=False)
-        msgs.append(box(str(table) + f"\nPage {len(msgs) + 1}", lang="css"))
+        msgs.append(box(str(table) + f"\nPage {len(msgs) + 1}", lang="ansi"))
         await BaseMenu(
             source=SimpleSource(msgs),
             delete_message_after=True,
@@ -332,14 +339,19 @@ class EconomyCommands(AdventureMixin):
         Item names containing spaces must be enclosed in double quotes. `[p]give item @locastan
         "fine dagger" 1 att 1 charisma rare twohanded` will give a two handed .fine_dagger with 1
         attack and 1 charisma to locastan. if a stat is not specified it will default to 0, order
-        does not matter. available stats are attack(att), charisma(diplo) or charisma(cha),
-        intelligence(int), dexterity(dex), and luck.
-
-        Item rarity is one of normal, rare, epic, legendary, set, forged, event.
-
-        Event items can have their level requirement and degrade number set via:
-        N degrade - (Set to -1 to never degrade on rebirths)
-        N level
+        does not matter.
+        available stats are:
+         - `attack` or `att`
+         - `charisma` or `diplo`
+         - `charisma` or `cha`
+         - `intelligence` or `int`
+         - `dexterity` or `dex`
+         - `luck`
+         - `rarity` (one of normal, rare, epic, legendary, set, forged, or event)
+         - `degrade` (Set to -1 to never degrade on rebirths)
+         - `level` (lvl)
+         - `slot` (one of `head`, `neck`, `chest`, `gloves`, `belt`, `legs`, `boots`, `left`, `right`
+         `ring`, `charm`, `twohanded`)
 
         `[p]give item @locastan "fine dagger" 1 att 1 charisma -1 degrade 100 level rare twohanded`
         """
@@ -363,7 +375,7 @@ class EconomyCommands(AdventureMixin):
                 _("An item named {item} has been created and placed in {author}'s backpack.").format(
                     item=item, author=escape(user.display_name)
                 ),
-                lang="css",
+                lang="ansi",
             )
         )
 
@@ -371,23 +383,34 @@ class EconomyCommands(AdventureMixin):
     async def _give_loot(
         self,
         ctx: commands.Context,
-        loot_type: str,
+        loot_type: RarityConverter,
         users: commands.Greedy[Union[discord.Member, discord.User]] = None,
         number: int = 1,
     ):
         """[Owner] Give treasure chest(s) to all specified users."""
 
         users = users or [ctx.author]
-        loot_types = ["normal", "rare", "epic", "legendary", "ascended", "set"]
+        loot_types = [
+            Rarities.normal,
+            Rarities.rare,
+            Rarities.epic,
+            Rarities.legendary,
+            Rarities.ascended,
+            Rarities.set,
+        ]
         if loot_type not in loot_types:
             return await smart_embed(
                 ctx,
-                (
-                    "Valid loot types: `normal`, `rare`, `epic`, `legendary`, `ascended` or `set`: "
-                    "ex. `{}give loot normal @locastan` "
-                ).format(ctx.prefix),
+                box(
+                    ("Valid loot types: {loot_types}: " "ex. `{prefix}give loot normal @locastan` ").format(
+                        prefix=ctx.prefix, loot_types=humanize_list([i.ansi for i in loot_types])
+                    ),
+                    lang="ansi",
+                ),
             )
-        if loot_type in ["legendary", "set", "ascended"] and not await ctx.bot.is_owner(ctx.author):
+        if loot_type in [Rarities.legendary, Rarities.set, Rarities.ascended] and not await ctx.bot.is_owner(
+            ctx.author
+        ):
             return await smart_embed(ctx, _("You are not worthy to award legendary loot."))
         for user in users:
             async with self.get_lock(user):
@@ -396,34 +419,26 @@ class EconomyCommands(AdventureMixin):
                 except Exception as exc:
                     log.exception("Error with the new character sheet", exc_info=exc)
                     continue
-                if loot_type == "rare":
-                    c.treasure[1] += number
-                elif loot_type == "epic":
-                    c.treasure[2] += number
-                elif loot_type == "legendary":
-                    c.treasure[3] += number
-                elif loot_type == "ascended":
-                    c.treasure[4] += number
-                elif loot_type == "set":
-                    c.treasure[5] += number
+                if loot_type is Rarities.rare:
+                    c.treasure.rare += number
+                elif loot_type is Rarities.epic:
+                    c.treasure.epic += number
+                elif loot_type is Rarities.legendary:
+                    c.treasure.legendary += number
+                elif loot_type is Rarities.ascended:
+                    c.treasure.ascended += number
+                elif loot_type is Rarities.set:
+                    c.treasure.set += number
                 else:
-                    c.treasure[0] += number
+                    c.treasure.normal += number
                 await self.config.user(user).set(await c.to_json(ctx, self.config))
+                chests = c.treasure.ansi
                 await ctx.send(
                     box(
-                        _(
-                            "{author} now owns {normal} normal, "
-                            "{rare} rare, {epic} epic, "
-                            "{leg} legendary, {asc} ascended and {set} set treasure chests."
-                        ).format(
+                        _("{author} now owns {chests} chests.").format(
                             author=escape(user.display_name),
-                            normal=str(c.treasure[0]),
-                            rare=str(c.treasure[1]),
-                            epic=str(c.treasure[2]),
-                            leg=str(c.treasure[3]),
-                            asc=str(c.treasure[4]),
-                            set=str(c.treasure[5]),
+                            chests=chests,
                         ),
-                        lang="css",
+                        lang="ansi",
                     )
                 )
